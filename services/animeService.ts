@@ -1,13 +1,13 @@
 import { JikanResponse, Anime, Episode } from '../types';
 
 const BASE_URL = 'https://api.jikan.moe/v4';
-const BACKEND_URL = 'http://localhost:5000/api'; // URL Backend Lokal
+const SCRAPER_API = 'https://apidatav2-ck1u.vercel.app/api/scrape';
 
-// Helper for delay to avoid rate limiting
+// Helper for delay to avoid Jikan rate limiting (3 requests per second)
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const getTopAnime = async (page = 1): Promise<JikanResponse<Anime[]>> => {
-  await delay(300); // Gentle rate limit handling
+  await delay(300);
   const response = await fetch(`${BASE_URL}/top/anime?page=${page}&filter=bypopularity`);
   if (!response.ok) throw new Error('Failed to fetch top anime');
   return response.json();
@@ -41,21 +41,61 @@ export const getAnimeEpisodes = async (id: number, page = 1): Promise<JikanRespo
   return response.json();
 };
 
-export const getAnimeRecommendations = async (id: number): Promise<{ data: { entry: Anime }[] }> => {
-  await delay(300);
-  const response = await fetch(`${BASE_URL}/anime/${id}/recommendations`);
-  if (!response.ok) throw new Error('Failed to fetch recommendations');
-  return response.json();
-};
+// --- STREAMING LOGIC ---
 
-// Fungsi baru untuk memanggil backend scraping
-export const getStreamUrl = async (server: string, title: string, episode: number): Promise<{ success: boolean; url: string }> => {
+export const getStreamUrl = async (server: string, title: string, episode: number): Promise<{ success: boolean; url: string; message?: string }> => {
   try {
-    const response = await fetch(`${BACKEND_URL}/stream?server=${encodeURIComponent(server)}&title=${encodeURIComponent(title)}&episode=${episode}`);
-    if (!response.ok) throw new Error('Backend offline');
-    return response.json();
+    // 1. Clean and Format Title for Search
+    // Removing special characters usually helps with search accuracy on pirate sites
+    const cleanTitle = title.replace(/[^\w\s]/gi, '').trim(); 
+    const formatQuery = (t: string) => encodeURIComponent(t.toLowerCase());
+    const formattedTitle = formatQuery(cleanTitle);
+    
+    let targetUrl = '';
+    
+    // 2. Construct Search URL based on Server
+    // Note: These URLs are search pages. The scraper API will visit them and look for video players.
+    if (server.includes('Kurama')) {
+       targetUrl = `https://v9.kuramanime.tel/anime?search=${formattedTitle}`;
+    } else if (server.includes('Samehadaku')) {
+       targetUrl = `https://samehadaku.care/?s=${formattedTitle}`;
+    } else if (server.includes('MovieBox')) {
+       targetUrl = `https://moviebox.ph/search?q=${formattedTitle}`;
+    } else {
+       return { success: false, url: '', message: 'Server not supported' };
+    }
+
+    // 3. Call External Scraper API
+    // This API acts as a proxy/scraper that renders the targetURL and extracts video sources.
+    const response = await fetch(SCRAPER_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        siteUrl: targetUrl 
+      }),
+    });
+
+    if (!response.ok) throw new Error(`Scraper API Error: ${response.status}`);
+
+    const hasil = await response.json();
+
+    // 4. Process Results
+    if (hasil.success && Array.isArray(hasil.data) && hasil.data.length > 0) {
+       // Naive logic: Pick the first result that looks like a video or embed
+       // In a real scenario, we might need to filter by Episode Number, but scraping search results is inexact.
+       const match = hasil.data.find((item: any) => item.videoUrl || item.embedUrl);
+       
+       if (match) {
+         return { success: true, url: match.videoUrl || match.embedUrl };
+       }
+    }
+    
+    return { success: false, url: '', message: 'No stream found in search results.' };
+
   } catch (error) {
     console.error("Stream fetch error:", error);
-    return { success: false, url: '' };
+    return { success: false, url: '', message: 'Failed to connect to scraper.' };
   }
 };
